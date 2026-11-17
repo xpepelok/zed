@@ -1,5 +1,8 @@
 use std::{
-    sync::LazyLock,
+    sync::{
+        LazyLock,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -19,6 +22,50 @@ static QPC_TICKS_PER_SECOND: LazyLock<u64> = LazyLock::new(|| {
     unsafe { QueryPerformanceFrequency(&mut frequency).unwrap() };
     frequency as u64
 });
+
+static FRAME_SIGNAL: (parking_lot::Mutex<bool>, parking_lot::Condvar) =
+    (parking_lot::Mutex::new(true), parking_lot::Condvar::new());
+
+fn signal_frame_demand() {
+    let mut pending = FRAME_SIGNAL.0.lock();
+    *pending = true;
+    FRAME_SIGNAL.1.notify_one();
+}
+
+/// Blocks the vsync thread until some window asks for a frame or `timeout` passes.
+/// Returns whether a frame was asked for.
+pub(crate) fn wait_for_frame_demand(timeout: Duration) -> bool {
+    let mut pending = FRAME_SIGNAL.0.lock();
+    if !*pending {
+        FRAME_SIGNAL.1.wait_for(&mut pending, timeout);
+    }
+    std::mem::replace(&mut *pending, false)
+}
+
+/// Whether a window wants a frame. Windows that ask for nothing are left alone
+/// by the vsync thread, so an idle window costs no redraws.
+pub(crate) struct FrameDemand {
+    pending: AtomicBool,
+}
+
+impl FrameDemand {
+    pub(crate) fn new() -> Self {
+        signal_frame_demand();
+        Self {
+            pending: AtomicBool::new(true),
+        }
+    }
+
+    pub(crate) fn request(&self) {
+        if !self.pending.swap(true, Ordering::AcqRel) {
+            signal_frame_demand();
+        }
+    }
+
+    pub(crate) fn take(&self) -> bool {
+        self.pending.swap(false, Ordering::AcqRel)
+    }
+}
 
 const VSYNC_INTERVAL_THRESHOLD: Duration = Duration::from_millis(1);
 const DEFAULT_VSYNC_INTERVAL: Duration = Duration::from_micros(16_666); // ~60Hz

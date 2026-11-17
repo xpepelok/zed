@@ -39,9 +39,12 @@ use windows::{
 use crate::*;
 use gpui::*;
 
+const IDLE_DEVICE_CHECK: std::time::Duration = std::time::Duration::from_secs(1);
+
 struct TrackedWindow {
     handle: SafeHwnd,
     frame_signal: Arc<PlatformFrameSignal>,
+    frame_demand: Arc<FrameDemand>,
 }
 
 impl TrackedWindow {
@@ -464,7 +467,12 @@ impl WindowsPlatform {
             .spawn(move || {
                 let vsync_provider = VSyncProvider::new();
                 loop {
-                    let signal_source = vsync_provider.wait_for_vsync();
+                    let demanded = wait_for_frame_demand(IDLE_DEVICE_CHECK);
+                    let signal_source = if demanded {
+                        vsync_provider.wait_for_vsync()
+                    } else {
+                        FrameRequestSource::LocalSchedule
+                    };
                     let signal_at = PlatformFrameSignal::capture(scheduler::Instant::now);
                     if stop.load(Ordering::Acquire) {
                         break;
@@ -486,6 +494,9 @@ impl WindowsPlatform {
                         break;
                     };
                     for hwnd in all_windows.read().iter() {
+                        if !hwnd.frame_demand.take() {
+                            continue;
+                        }
                         unsafe {
                             if let Some(signal_at) = signal_at {
                                 if IsWindowVisible(hwnd.as_raw()).as_bool()
@@ -774,6 +785,7 @@ impl Platform for WindowsPlatform {
         self.raw_window_handles.write().push(TrackedWindow {
             handle: handle.into(),
             frame_signal: window.state.frame_signal.clone(),
+            frame_demand: window.state.frame_demand.clone(),
         });
 
         Ok(Box::new(window))
