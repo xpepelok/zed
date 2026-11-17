@@ -2140,7 +2140,12 @@ impl Window {
         }));
         platform_window.on_display_changed(Box::new({
             let cx = cx.to_async();
-            move || cx.update(|cx| Window::display_changed(handle, cx))
+            move || {
+                // The platform reports this from inside native calls such as
+                // `SetWindowPos`, which can run while the app is borrowed.
+                cx.spawn(async move |cx| cx.update(|cx| Window::display_changed(handle, cx)))
+                    .detach();
+            }
         }));
         platform_window.on_appearance_changed(Box::new({
             let cx = cx.to_async();
